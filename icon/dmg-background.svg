@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 400" width="660" height="400">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF7EE"/>
+      <stop offset="1" stop-color="#FFE7D2"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF8A3D" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FF6F3C" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+  <rect width="660" height="400" fill="url(#bg)"/>
+  <text x="330" y="52" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#7A3E12">Install CaffeineTimer</text>
+  <text x="330" y="80" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="14.5" fill="#B5713A">Drag the cup into your Applications folder</text>
+  <rect x="258" y="169" width="128" height="13" rx="6.5" fill="url(#arrow)"/>
+  <path d="M382 159 L418 175.5 L382 192 Z" fill="#FF6F3C"/>
+</svg>

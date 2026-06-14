@@ -1,0 +1,19 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Build output
+dist/
+
+# macOS
+.DS_Store
+
+# Editor
+*.xcuserstate
+*.swp
+
+# Private/internal docs — kept only in the canonical private repo
+CLAUDE.md
+DMG_RECIPE.md
+publish.sh
