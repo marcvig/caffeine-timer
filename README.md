@@ -65,8 +65,8 @@ dependencies — just one small native app.
 > Requires the Xcode **Command Line Tools** (no full Xcode needed) and Apple Silicon.
 
 ```sh
-git clone git@github.com:marcvig/caffeinate-mac-timer.git
-cd caffeinate-mac-timer
+git clone https://github.com/marcvig/caffeine-timer.git
+cd caffeine-timer
 ./build.sh                      # builds, bundles, signs → dist/CaffeineTimer.app
 open dist/CaffeineTimer.app     # launch it
 ```
@@ -78,7 +78,7 @@ writable; override with `INSTALL_DIR=...`).
 
 A signed, notarized drag-to-Applications disk image is produced by `./make_dmg.sh`
 (→ `dist/CaffeineTimer.dmg`). When a tagged release is published, the DMG will be attached
-to it on the [Releases page](https://github.com/marcvig/caffeinate-mac-timer/releases).
+to it on the [Releases page](https://github.com/marcvig/caffeine-timer/releases).
 
 ### Homebrew
 
