@@ -12,6 +12,7 @@ Like the `caffeinate` command-line tool — but with a coffee-cup in your menu b
 ![Swift](https://img.shields.io/badge/Swift-6-orange)
 ![Arch](https://img.shields.io/badge/arch-Apple%20Silicon-lightgrey)
 ![Menu bar app](https://img.shields.io/badge/UI-menu%20bar%20only-success)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
@@ -60,9 +61,34 @@ dependencies — just one small native app.
 
 ## Installation
 
-### Build from source (works today)
+> Requires **macOS 13 (Ventura) or later** on **Apple Silicon**.
 
-> Requires the Xcode **Command Line Tools** (no full Xcode needed) and Apple Silicon.
+### Download the DMG
+
+1. Download the latest **`CaffeineTimer-x.y.z.dmg`** from the
+   [Releases page](https://github.com/marcvig/caffeine-timer/releases/latest).
+2. Open it, then drag **CaffeineTimer** into your **Applications** folder.
+3. Launch it — the coffee-cup appears in your menu bar.
+
+The app is signed with a Developer ID and **notarized by Apple**, so it opens without an
+"unidentified developer" warning.
+
+### Homebrew
+
+Install from the personal tap. Homebrew 6+ requires you to **trust** a third-party tap once
+before installing:
+
+```sh
+brew tap marcvig/tap
+brew trust --cask marcvig/tap/caffeine-timer   # one-time, required by Homebrew 6+
+brew install --cask marcvig/tap/caffeine-timer
+```
+
+Update later with `brew upgrade --cask caffeine-timer`.
+
+### Build from source
+
+> Requires the Xcode **Command Line Tools** (no full Xcode needed).
 
 ```sh
 git clone https://github.com/marcvig/caffeine-timer.git
@@ -73,21 +99,6 @@ open dist/CaffeineTimer.app     # launch it
 
 `build.sh` also installs the app to `/Applications` (or `~/Applications` if that isn't
 writable; override with `INSTALL_DIR=...`).
-
-### Download the DMG
-
-A signed, notarized drag-to-Applications disk image is produced by `./make_dmg.sh`
-(→ `dist/CaffeineTimer.dmg`). When a tagged release is published, the DMG will be attached
-to it on the [Releases page](https://github.com/marcvig/caffeine-timer/releases).
-
-### Homebrew
-
-Once the repository is public and a release is published, it will be installable from a
-personal tap:
-
-```sh
-brew install --cask marcvig/tap/caffeine-timer
-```
 
 ## How it works (architecture)
 
@@ -156,8 +167,8 @@ Code signing uses a Developer ID identity if one is present in the keychain (ove
 
 ## License
 
-Personal project — no license is currently specified, so all rights are reserved by the
-author. (A license may be added if the project is opened up for reuse.)
+Released under the [MIT License](LICENSE) — © 2026 Marc Vigod. Use it, modify it, ship it;
+provided as-is, with no warranty.
 
 ---
 
