@@ -17,3 +17,5 @@ dist/
 CLAUDE.md
 DMG_RECIPE.md
 publish.sh
+tools/
+AGENTS.md

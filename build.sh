@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # build.sh — compile, bundle, and codesign CaffeineTimer.app.
-# Requires only the Command Line Tools (no Xcode). Verified on macOS 26 / Swift 6.3.
+# Uses SwiftPM + hand assembly. If Xcode is installed, also compiles Assets.car
+# from AppIcon.icns so current macOS notification UI can resolve CFBundleIconName.
+# Verified on macOS 26 / Swift 6.3.
 set -euo pipefail
 
 APP_NAME="CaffeineTimer"
@@ -32,6 +34,66 @@ cp "$BIN" "$APP/Contents/MacOS/${APP_NAME}"
 cp "$ROOT/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$ROOT/icon/MenuIcon.pdf" "$APP/Contents/Resources/MenuIcon.pdf"
 
+echo "==> asset catalog"
+compile_assets_car() {
+    local actool_developer_dir="${ACTOOL_DEVELOPER_DIR:-}"
+    local tmp iconset appiconset
+    local -a actool_cmd
+
+    if [ -z "$actool_developer_dir" ] && [ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/actool" ]; then
+        actool_developer_dir="/Applications/Xcode.app/Contents/Developer"
+    fi
+
+    if [ -n "$actool_developer_dir" ]; then
+        actool_cmd=(env "DEVELOPER_DIR=$actool_developer_dir" xcrun actool)
+    elif xcrun --find actool >/dev/null 2>&1; then
+        actool_cmd=(xcrun actool)
+    else
+        echo "    actool not found; keeping classic AppIcon.icns only"
+        return 0
+    fi
+
+    tmp="$(mktemp -d)"
+    iconset="$tmp/AppIcon.iconset"
+    appiconset="$tmp/Assets.xcassets/AppIcon.appiconset"
+    mkdir -p "$appiconset"
+    trap 'rm -rf "$tmp"; trap - RETURN' RETURN
+
+    iconutil -c iconset "$ROOT/icon/AppIcon.icns" -o "$iconset"
+    cp "$iconset"/*.png "$appiconset/"
+    cat > "$appiconset/Contents.json" <<'EOF'
+{
+  "images" : [
+    { "filename" : "icon_16x16.png", "idiom" : "mac", "scale" : "1x", "size" : "16x16" },
+    { "filename" : "icon_16x16@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "16x16" },
+    { "filename" : "icon_32x32.png", "idiom" : "mac", "scale" : "1x", "size" : "32x32" },
+    { "filename" : "icon_32x32@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "32x32" },
+    { "filename" : "icon_128x128.png", "idiom" : "mac", "scale" : "1x", "size" : "128x128" },
+    { "filename" : "icon_128x128@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "128x128" },
+    { "filename" : "icon_256x256.png", "idiom" : "mac", "scale" : "1x", "size" : "256x256" },
+    { "filename" : "icon_256x256@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "256x256" },
+    { "filename" : "icon_512x512.png", "idiom" : "mac", "scale" : "1x", "size" : "512x512" },
+    { "filename" : "icon_512x512@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "512x512" }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+EOF
+
+    "${actool_cmd[@]}" "$tmp/Assets.xcassets" \
+        --compile "$APP/Contents/Resources" \
+        --platform macosx \
+        --minimum-deployment-target "$MIN_OS" \
+        --app-icon AppIcon \
+        --output-partial-info-plist "$tmp/assetcatalog_generated_info.plist" >/dev/null
+
+    test -f "$APP/Contents/Resources/Assets.car"
+    echo "    wrote Contents/Resources/Assets.car"
+}
+compile_assets_car
+
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -42,6 +104,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>         <string>${DISPLAY_NAME}</string>
     <key>CFBundleExecutable</key>          <string>${APP_NAME}</string>
     <key>CFBundleIconFile</key>            <string>AppIcon</string>
+    <key>CFBundleIconName</key>            <string>AppIcon</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key>             <string>${BUILD_VERSION}</string>
@@ -107,8 +170,12 @@ INSTALL="$INSTALL_DIR/${APP_NAME}.app"
 echo "==> install to $INSTALL (replaces any running instance)"
 pkill -x "$APP_NAME" 2>/dev/null || true
 
-# Unregister the build artifact and remove any stale copy in the OTHER location.
+# Unregister the build artifact and installed copy before replacing it, and
+# remove any stale copy in the OTHER location.
 "$LSREG" -u "$APP" 2>/dev/null || true
+if [ -e "$INSTALL" ]; then
+    "$LSREG" -u "$INSTALL" 2>/dev/null || true
+fi
 for OTHER in "/Applications/${APP_NAME}.app" "$HOME/Applications/${APP_NAME}.app"; do
     if [ "$OTHER" != "$INSTALL" ] && [ -e "$OTHER" ]; then
         "$LSREG" -u "$OTHER" 2>/dev/null || true
@@ -117,7 +184,7 @@ for OTHER in "/Applications/${APP_NAME}.app" "$HOME/Applications/${APP_NAME}.app
 done
 
 rm -rf "$INSTALL"
-cp -R "$APP" "$INSTALL"
+ditto "$APP" "$INSTALL"
 "$LSREG" -f "$INSTALL"
 echo "    LS registrations for ${BUNDLE_ID}: $("$LSREG" -dump 2>/dev/null | grep -c "identifier: *${BUNDLE_ID}")"
 open "$INSTALL"
