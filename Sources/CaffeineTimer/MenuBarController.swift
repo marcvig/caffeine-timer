@@ -67,6 +67,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func buildMenu() {
         menu.autoenablesItems = false // we manage every item's enabled state ourselves
 
+        let about = NSMenuItem(title: "About CaffeineTimer",
+                               action: #selector(showAbout), keyEquivalent: "")
+        about.target = self // status-item menus aren't in the responder chain
+        menu.addItem(about)
+        menu.addItem(.separator())
+
         headerItem.isEnabled = false
         menu.addItem(headerItem)
         menu.addItem(.separator())
@@ -123,6 +129,33 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func openNotificationSettings() {
         NotificationManager.shared.openSystemNotificationSettings()
+    }
+
+    /// Standard macOS About panel: shows the app icon + version automatically, plus a maker
+    /// link, source repo, support link, and Homebrew update instructions in the credits.
+    @objc private func showAbout() {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        para.paragraphSpacing = 4
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: para,
+        ]
+        let credits = NSMutableAttributedString()
+        func text(_ s: String) { credits.append(NSAttributedString(string: s, attributes: base)) }
+        func link(_ label: String, _ url: String) {
+            var a = base; a[.link] = URL(string: url); a[.foregroundColor] = NSColor.linkColor
+            credits.append(NSAttributedString(string: label, attributes: a))
+        }
+        text("Keep your Mac awake for a set duration.\n\n")
+        text("Made by ");  link("Vigod Labs", "https://vigodlabs.com");  text("\n")
+        link("Source on GitHub", "https://github.com/marcvig/caffeine-timer");  text("\n")
+        link("Support", "https://vigodlabs.com/support");  text("\n\n")
+        text("Update with Homebrew:\nbrew upgrade --cask caffeine-timer")
+
+        NSApp.activate(ignoringOtherApps: true) // bring the panel to front for an agent app
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
     // MARK: Session control
