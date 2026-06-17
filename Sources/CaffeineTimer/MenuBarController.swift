@@ -28,10 +28,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private var tickTimer: Timer?
+    private lazy var baseGlyph: NSImage? = loadMenuGlyph() // cached; re-tinted per tick when active
 
     // MARK: Menu items
 
     private let headerItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+    private let progressItem = NSMenuItem() // hosts the "time used" bar below the header
+    private let progressBar = BarView(frame: NSRect(x: 0, y: 0, width: 220, height: 14))
     private var durationItems: [NSMenuItem] = []
     private let indefiniteItem = NSMenuItem(title: "Indefinite", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "Stop", action: nil, keyEquivalent: "")
@@ -75,6 +78,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         headerItem.isEnabled = false
         menu.addItem(headerItem)
+
+        progressItem.view = progressBar
+        progressItem.isHidden = true // shown only during a timed session
+        menu.addItem(progressItem)
+
         menu.addItem(.separator())
 
         for option in timedOptions {
@@ -229,25 +237,41 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if Date() >= end {
             stop(notify: true) // natural expiry
         } else {
-            updateButtonTitle()
+            updateButton()      // re-tint icon + countdown to the current green→red ramp color
             updateHeaderTitle() // keep the header live if the menu is held open
         }
     }
 
     // MARK: Status-item button
 
-    /// Color for the active state (cup glyph + countdown). `.systemRed` is dynamic,
-    /// so it stays readable on light and dark menu bars. Swap here to restyle
-    /// (e.g. `.systemOrange`, `.systemGreen`).
+    /// Fallback active color (used for an indefinite session, which has no progress to ramp).
+    /// `.systemRed` is dynamic, so it stays readable on light and dark menu bars.
     private static let activeColor: NSColor = .systemRed
+
+    /// Current status-item tint: shifts green→red across a timed session to match the menu's
+    /// progress bar and header countdown; steady `activeColor` for an indefinite session.
+    private var activeTint: NSColor {
+        if case let .timed(end, minutes) = session { return BarView.color(at: Self.usedFraction(end: end, minutes: minutes)) }
+        return Self.activeColor
+    }
+
+    /// Fraction of a timed session that has elapsed (0…1), shared by the header, progress bar,
+    /// and status-item tint so they stay in lockstep.
+    private static func usedFraction(end: Date, minutes: Int) -> CGFloat {
+        let total = Double(minutes) * 60
+        let remaining = max(0, end.timeIntervalSinceNow)
+        return CGFloat(total > 0 ? min(max((total - remaining) / total, 0), 1) : 0)
+    }
 
     private func updateButton() {
         guard let button = statusItem.button else { return }
-        if let glyph = loadMenuGlyph() {
+        if let glyph = baseGlyph {
             if isActive {
-                // The menu bar renders template images monochrome and ignores
-                // contentTintColor, so use a solid-red (non-template) copy when active.
-                button.image = Self.tinted(glyph, color: Self.activeColor)
+                // The menu bar renders template images monochrome and ignores contentTintColor,
+                // so use a solid-color (non-template) copy when active. The tint shifts green→red
+                // across a timed session (see activeTint).
+                glyph.isTemplate = false
+                button.image = Self.tinted(glyph, color: activeTint)
             } else {
                 glyph.isTemplate = true // adaptive white/black to match the menu bar
                 button.image = glyph
@@ -301,7 +325,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// because the menu bar won't apply our color to a plain `title`.
     private func setActiveTitle(_ text: String, on button: NSStatusBarButton) {
         button.attributedTitle = NSAttributedString(string: text, attributes: [
-            .foregroundColor: Self.activeColor,
+            .foregroundColor: activeTint,
             .font: NSFont.menuBarFont(ofSize: 0),
         ])
         button.imagePosition = .imageLeading // icon, then countdown text
@@ -315,12 +339,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func updateHeaderTitle() {
         switch session {
         case .idle:
+            headerItem.attributedTitle = nil
             headerItem.title = "Idle · your Mac sleeps normally"
+            progressItem.isHidden = true
         case .indefinite:
-            headerItem.title = "Awake · indefinitely"
-        case let .timed(end, _):
-            headerItem.title = "Awake · \(Self.preciseCountdown(end.timeIntervalSinceNow)) left"
+            headerItem.attributedTitle = Self.activeHeader(
+                value: "indefinitely", valueColor: Self.activeColor, suffix: "", percent: nil)
+            progressItem.isHidden = true
+        case let .timed(end, minutes):
+            let used = Self.usedFraction(end: end, minutes: minutes)
+            headerItem.attributedTitle = Self.activeHeader(
+                value: Self.preciseCountdown(end.timeIntervalSinceNow), valueColor: BarView.color(at: used),
+                suffix: " left", percent: Int((used * 100).rounded()))
+            progressBar.fraction = used
+            progressItem.isHidden = false
         }
+    }
+
+    /// "Awake · <value><suffix> · <percent>%" with the live countdown <value> in bold, tinted by
+    /// `valueColor` (the progress-bar color at the current fraction), and the framing in fully-
+    /// opaque primary label color, so the header pops instead of the dim/translucent gray a
+    /// disabled menu item renders by default. (Disabled items dim a plain `title`, but honor an
+    /// attributed title's colors — same trick the status bar uses.)
+    private static func activeHeader(value: String, valueColor: NSColor, suffix: String, percent: Int?) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: 0)
+        let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        let framing: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.labelColor, .font: font]
+        let s = NSMutableAttributedString(string: "Awake · ", attributes: framing)
+        s.append(NSAttributedString(string: value, attributes: [.foregroundColor: valueColor, .font: bold]))
+        if !suffix.isEmpty { s.append(NSAttributedString(string: suffix, attributes: framing)) }
+        if let percent { s.append(NSAttributedString(string: " · \(percent)%", attributes: framing)) }
+        return s
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -373,5 +422,56 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case 120: return "2 hours"
         default: return "\(minutes) minutes"
         }
+    }
+}
+
+/// Slim determinate "time used" bar hosted in a menu item: a subtle rounded track with a
+/// `fillColor` fill proportional to `fraction` (0…1). Autoresizes to the menu's width and
+/// insets to align with the menu's text margin.
+private final class BarView: NSView {
+    /// Progress gradient stops, left→right: plenty of time left (green) → almost out (red).
+    /// Single source of truth — the header countdown is tinted from the same ramp via color(at:).
+    static let gradientStops: [NSColor] = [.systemGreen, .systemOrange, .systemRed]
+
+    /// The gradient color at position `f` (0…1), so the header countdown can match the bar's
+    /// fill color at the same fraction.
+    static func color(at f: CGFloat) -> NSColor {
+        let stops = gradientStops
+        let scaled = min(max(f, 0), 1) * CGFloat(stops.count - 1)
+        let i = min(Int(scaled), stops.count - 2)
+        return stops[i].blended(withFraction: scaled - CGFloat(i), of: stops[i + 1]) ?? stops[i]
+    }
+
+    var fraction: CGFloat = 0 { didSet { if fraction != oldValue { needsDisplay = true } } }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        autoresizingMask = [.width] // span the menu's content width
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let inset: CGFloat = 21, barHeight: CGFloat = 4
+        let track = NSRect(x: inset, y: (bounds.height - barHeight) / 2,
+                           width: max(0, bounds.width - inset * 2), height: barHeight)
+        guard track.width > 0 else { return }
+        let radius = barHeight / 2
+
+        // Subtle track behind the fill.
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: track, xRadius: radius, yRadius: radius).fill()
+
+        let f = min(max(fraction, 0), 1)
+        guard f > 0 else { return }
+        // Green→orange→red gradient anchored to the FULL track and revealed left-to-right as
+        // time is used: the color at any point is fixed by its position on the bar (green while
+        // plenty of time remains, red as it runs out) and blends gently between, rather than the
+        // whole fill shifting color with the current fraction.
+        let fillWidth = max(barHeight, track.width * f) // keep a rounded nub at very small %
+        let fillRect = NSRect(x: track.minX, y: track.minY, width: fillWidth, height: barHeight)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).addClip()
+        NSGradient(colors: Self.gradientStops)?.draw(in: track, angle: 0)
+        NSGraphicsContext.restoreGraphicsState()
     }
 }
