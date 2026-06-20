@@ -8,8 +8,8 @@ set -euo pipefail
 APP_NAME="CaffeineTimer"
 BUNDLE_ID="com.vigod.caffeinetimer"
 DISPLAY_NAME="Caffeine Timer"
-SHORT_VERSION="1.3.0"
-BUILD_VERSION="5"
+SHORT_VERSION="1.3.1"
+BUILD_VERSION="6"
 MIN_OS="13.0"
 COPYRIGHT="Copyright © 2026 Marc Vigod."
 

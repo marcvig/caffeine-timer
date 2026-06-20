@@ -17,7 +17,9 @@ final class AboutWindowController {
         w.title = "About Caffeine Timer"
         w.isReleasedWhenClosed = false
         w.contentView = content
-        w.setContentSize(content.fittingSize)
+        var size = content.fittingSize
+        size.width = max(size.width, 400) // roomier than the tight fit-to-content width
+        w.setContentSize(size)
         w.center()
         window = w
         w.makeKeyAndOrderFront(nil)
@@ -30,7 +32,7 @@ final class AboutWindowController {
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 22, left: 30, bottom: 22, right: 30)
+        stack.edgeInsets = NSEdgeInsets(top: 26, left: 36, bottom: 26, right: 36)
 
         let icon = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -51,7 +53,7 @@ final class AboutWindowController {
         let tagline = textLabel("Keep your Mac awake for a set duration.",
                                 font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         tagline.lineBreakMode = .byWordWrapping
-        tagline.preferredMaxLayoutWidth = 250
+        tagline.preferredMaxLayoutWidth = 320
         stack.addArrangedSubview(tagline)
         stack.setCustomSpacing(16, after: tagline)
 
@@ -67,13 +69,56 @@ final class AboutWindowController {
         stack.addArrangedSubview(links)
         stack.setCustomSpacing(12, after: links)
 
-        let brew = NSTextField(labelWithString: UpdateChecker.brewCommand)
-        brew.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        brew.textColor = .tertiaryLabelColor
-        brew.isSelectable = true
-        stack.addArrangedSubview(brew)
+        stack.addArrangedSubview(makeBrewBox())
 
         return stack
+    }
+
+    /// A monospace "code box" for the Homebrew command with a copy-to-clipboard button beside it.
+    private func makeBrewBox() -> NSView {
+        let code = NSTextField(labelWithString: UpdateChecker.brewCommand)
+        code.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        code.textColor = .labelColor
+        code.isSelectable = true
+        code.translatesAutoresizingMaskIntoConstraints = false
+
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        box.layer?.cornerRadius = 6
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.separatorColor.cgColor
+        box.addSubview(code)
+        NSLayoutConstraint.activate([
+            code.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
+            code.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+            code.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
+            code.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
+        ])
+
+        let copy = NSButton(title: "", target: self, action: #selector(copyBrewTapped(_:)))
+        copy.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")
+        copy.imagePosition = .imageOnly
+        copy.bezelStyle = .texturedRounded
+        copy.toolTip = "Copy to clipboard"
+
+        let row = NSStackView(views: [box, copy])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        return row
+    }
+
+    @objc private func copyBrewTapped(_ sender: NSButton) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(UpdateChecker.brewCommand, forType: .string)
+        // Brief confirmation: swap to a green checkmark, then revert.
+        sender.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")
+        sender.contentTintColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak sender] in
+            sender?.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")
+            sender?.contentTintColor = nil
+        }
     }
 
     private func info(_ key: String) -> String {
