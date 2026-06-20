@@ -12,7 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private enum Session {
         case idle
-        case timed(end: Date, minutes: Int)
+        case timed(end: Date, totalSeconds: Int)
         case indefinite
     }
 
@@ -39,6 +39,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let indefiniteItem = NSMenuItem(title: "Indefinite", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "Stop", action: nil, keyEquivalent: "")
     private let enableNotifsItem = NSMenuItem(title: "Turn On Notifications…", action: nil, keyEquivalent: "")
+    private let customItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
+    private let allowSleepItem = NSMenuItem(title: "Allow display to sleep", action: nil, keyEquivalent: "")
+    private var dragOverlay: DurationDragOverlay?
+
+    /// When true, keep only the system awake and let the display sleep normally
+    /// (PreventUserIdleSystemSleep). Default false = keep the screen on too. Persisted.
+    private var allowDisplaySleep = UserDefaults.standard.bool(forKey: "AllowDisplaySleep")
 
     /// (menu label, minutes) for the timed options.
     private let timedOptions: [(label: String, minutes: Int)] = [
@@ -99,6 +106,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         indefiniteItem.target = self
         menu.addItem(indefiniteItem)
 
+        customItem.action = #selector(selectCustom)
+        customItem.target = self
+        menu.addItem(customItem)
+
+        menu.addItem(.separator())
+
+        allowSleepItem.action = #selector(toggleAllowDisplaySleep)
+        allowSleepItem.target = self
+        allowSleepItem.state = allowDisplaySleep ? .on : .off
+        menu.addItem(allowSleepItem)
+
         menu.addItem(.separator())
 
         stopItem.action = #selector(stopTapped)
@@ -131,8 +149,39 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         startIndefinite()
     }
 
+    /// "Custom…": dismiss the menu, then stretch a duration out from the menu-bar icon.
+    @objc private func selectCustom() {
+        let anchor = statusItemAnchorScreenPoint() // pin the rubber band to the cup icon
+        menu.cancelTracking() // close the menu before putting up the key overlay window
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let overlay = DurationDragOverlay()
+            self.dragOverlay = overlay // retain while presented
+            overlay.present(anchorScreen: anchor) { [weak self] seconds in
+                self?.dragOverlay = nil
+                if let seconds, seconds > 0 { self?.startTimed(seconds: seconds) }
+            }
+        }
+    }
+
+    /// Bottom-center of the menu-bar status item in screen coordinates, so the drag overlay
+    /// can stretch its rubber band from the icon. nil if the button/window isn't available.
+    private func statusItemAnchorScreenPoint() -> CGPoint? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        let inScreen = window.convertToScreen(button.convert(button.bounds, to: nil))
+        return CGPoint(x: inScreen.midX, y: inScreen.minY)
+    }
+
+    @objc private func toggleAllowDisplaySleep() {
+        allowDisplaySleep.toggle()
+        UserDefaults.standard.set(allowDisplaySleep, forKey: "AllowDisplaySleep")
+        allowSleepItem.state = allowDisplaySleep ? .on : .off
+        reacquireIfActive() // swap the live assertion so the change applies immediately
+    }
+
     @objc private func stopTapped() {
-        stop(notify: false) // user-initiated; the icon reverting is confirmation enough
+        stop(notification: (title: "Caffeine stopped",
+                            body: "Your Mac is no longer set to stay awake."))
     }
 
     @objc private func openNotificationSettings() {
@@ -168,22 +217,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: Session control
 
-    private func startTimed(minutes: Int) {
-        let end = Date().addingTimeInterval(TimeInterval(minutes * 60))
-        guard caffeine.start(reason: "CaffeineTimer: awake for \(minutes) minutes") else {
+    private func startTimed(minutes: Int) { startTimed(seconds: minutes * 60) }
+
+    private func startTimed(seconds: Int) {
+        let end = Date().addingTimeInterval(TimeInterval(seconds))
+        guard caffeine.start(reason: "CaffeineTimer: awake for \(humanDuration(seconds: seconds))",
+                             keepDisplayAwake: !allowDisplaySleep) else {
             reportFailure()
             return
         }
-        session = .timed(end: end, minutes: minutes)
+        session = .timed(end: end, totalSeconds: seconds)
         startTicking()
         updateButton()
         NotificationManager.shared.notify(
-            title: "Staying awake for \(humanDuration(minutes))",
+            title: "Staying awake for \(humanDuration(seconds: seconds))",
             body: "Your Mac won’t sleep until \(Self.clockFormatter.string(from: end)).")
     }
 
     private func startIndefinite() {
-        guard caffeine.start(reason: "CaffeineTimer: awake indefinitely") else {
+        guard caffeine.start(reason: "CaffeineTimer: awake indefinitely",
+                             keepDisplayAwake: !allowDisplaySleep) else {
             reportFailure()
             return
         }
@@ -195,16 +248,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             body: "Your Mac won’t sleep until you stop CaffeineTimer.")
     }
 
+    /// Re-acquire the keep-awake assertion for the current session under the current
+    /// display-sleep preference. Called when the user flips the toggle mid-session so it
+    /// takes effect at once. A failed re-acquire keeps the existing assertion held.
+    private func reacquireIfActive() {
+        switch session {
+        case .idle:
+            break
+        case let .timed(_, totalSeconds):
+            caffeine.start(reason: "CaffeineTimer: awake for \(humanDuration(seconds: totalSeconds))",
+                           keepDisplayAwake: !allowDisplaySleep)
+        case .indefinite:
+            caffeine.start(reason: "CaffeineTimer: awake indefinitely",
+                           keepDisplayAwake: !allowDisplaySleep)
+        }
+    }
+
     /// Manual stop (notify: false) or natural expiry (notify: true).
-    private func stop(notify: Bool) {
+    private func stop(notification: (title: String, body: String)?) {
         caffeine.stop()
         stopTicking()
         session = .idle
         updateButton()
-        if notify {
-            NotificationManager.shared.notify(
-                title: "Caffeine ended",
-                body: "Your Mac can sleep normally again.")
+        if let notification {
+            NotificationManager.shared.notify(title: notification.title, body: notification.body)
         }
     }
 
@@ -235,7 +302,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func tick() {
         guard case let .timed(end, _) = session else { return }
         if Date() >= end {
-            stop(notify: true) // natural expiry
+            stop(notification: (title: "Caffeine ended", // natural expiry
+                                body: "Your Mac can sleep normally again."))
         } else {
             updateButton()      // re-tint icon + countdown to the current green→red ramp color
             updateHeaderTitle() // keep the header live if the menu is held open
@@ -251,14 +319,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Current status-item tint: shifts green→red across a timed session to match the menu's
     /// progress bar and header countdown; steady `activeColor` for an indefinite session.
     private var activeTint: NSColor {
-        if case let .timed(end, minutes) = session { return BarView.color(at: Self.usedFraction(end: end, minutes: minutes)) }
+        if case let .timed(end, totalSeconds) = session { return BarView.color(at: Self.usedFraction(end: end, totalSeconds: totalSeconds)) }
         return Self.activeColor
     }
 
     /// Fraction of a timed session that has elapsed (0…1), shared by the header, progress bar,
     /// and status-item tint so they stay in lockstep.
-    private static func usedFraction(end: Date, minutes: Int) -> CGFloat {
-        let total = Double(minutes) * 60
+    private static func usedFraction(end: Date, totalSeconds: Int) -> CGFloat {
+        let total = Double(totalSeconds)
         let remaining = max(0, end.timeIntervalSinceNow)
         return CGFloat(total > 0 ? min(max((total - remaining) / total, 0), 1) : 0)
     }
@@ -346,8 +414,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             headerItem.attributedTitle = Self.activeHeader(
                 value: "indefinitely", valueColor: Self.activeColor, suffix: "", percent: nil)
             progressItem.isHidden = true
-        case let .timed(end, minutes):
-            let used = Self.usedFraction(end: end, minutes: minutes)
+        case let .timed(end, totalSeconds):
+            let used = Self.usedFraction(end: end, totalSeconds: totalSeconds)
             headerItem.attributedTitle = Self.activeHeader(
                 value: Self.preciseCountdown(end.timeIntervalSinceNow), valueColor: BarView.color(at: used),
                 suffix: " left", percent: Int((used * 100).rounded()))
@@ -375,11 +443,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         updateHeaderTitle()
 
-        let activeMinutes: Int?
-        if case let .timed(_, minutes) = session { activeMinutes = minutes } else { activeMinutes = nil }
+        let activeSeconds: Int?
+        if case let .timed(_, totalSeconds) = session { activeSeconds = totalSeconds } else { activeSeconds = nil }
         for item in durationItems {
-            let minutes = item.representedObject as? Int
-            item.state = (minutes != nil && minutes == activeMinutes) ? .on : .off
+            let seconds = (item.representedObject as? Int).map { $0 * 60 }
+            item.state = (seconds != nil && seconds == activeSeconds) ? .on : .off
         }
         if case .indefinite = session { indefiniteItem.state = .on } else { indefiniteItem.state = .off }
 
@@ -416,21 +484,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return String(format: "%ds", s)
     }
 
-    private func humanDuration(_ minutes: Int) -> String {
-        switch minutes {
-        case 60: return "1 hour"
-        case 120: return "2 hours"
-        default: return "\(minutes) minutes"
+    /// Friendly phrasing for a duration in seconds (preserves the presets' wording:
+    /// "15 minutes", "1 hour", "2 hours"; also handles sub-minute and hour+minute customs).
+    private func humanDuration(seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds) second\(seconds == 1 ? "" : "s")" }
+        let minutes = seconds / 60, secs = seconds % 60
+        if minutes < 60 {
+            if secs == 0 { return "\(minutes) minute\(minutes == 1 ? "" : "s")" }
+            return "\(minutes) min \(secs) s"
         }
+        let hours = minutes / 60, mins = minutes % 60
+        if mins == 0 { return "\(hours) hour\(hours == 1 ? "" : "s")" }
+        return "\(hours)h \(mins)m"
     }
 }
 
 /// Slim determinate "time used" bar hosted in a menu item: a subtle rounded track with a
 /// `fillColor` fill proportional to `fraction` (0…1). Autoresizes to the menu's width and
 /// insets to align with the menu's text margin.
-private final class BarView: NSView {
+final class BarView: NSView {
     /// Progress gradient stops, left→right: plenty of time left (green) → almost out (red).
-    /// Single source of truth — the header countdown is tinted from the same ramp via color(at:).
+    /// Single source of truth — the header countdown and the custom-duration drag overlay are
+    /// tinted from the same ramp via color(at:).
     static let gradientStops: [NSColor] = [.systemGreen, .systemOrange, .systemRed]
 
     /// The gradient color at position `f` (0…1), so the header countdown can match the bar's
