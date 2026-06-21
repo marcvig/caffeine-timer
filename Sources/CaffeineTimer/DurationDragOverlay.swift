@@ -69,7 +69,31 @@ private final class DragView: NSView {
     private var confirmStart: Date?
     private var animPhase: CGFloat = 0  // scrolls the prismatic gradient along the band
     private var frameTimer: Timer?      // one ~60fps loop: rainbow flow + retract + physics
-    private let ropeCount = 14          // segments of the springy band
+
+    /// Gate for the springy "rubber band" physics. When `false` (default), the band is a plain
+    /// straight line from the anchor to the cursor — all the spring-chain code below is kept
+    /// intact and simply bypassed. Flip to `true` to re-enable the wiggly rubber-band effect.
+    private static let physicsEnabled = false
+
+    /// Color palette for the band — both scroll in motion via `phase`. `.rainbow` = the original
+    /// full-spectrum prism (kept as an option); `.duotone` = a cinematic two-color combo (which
+    /// pair → `duotoneCombo`). Swap these lines to switch.
+    private enum BandPalette { case rainbow, duotone }
+    private static let palette: BandPalette = .duotone
+
+    /// Cool↔warm "teal and orange" combos to A/B test (hex values from Marc). Swap this one line.
+    private enum Duotone { case tealOrange, tealDeepOrange, neonBlueOrange, deepBlueDeepOrange }
+    private static let duotoneCombo: Duotone = .neonBlueOrange
+    private static func duotoneColors() -> (cool: NSColor, warm: NSColor) {
+        switch duotoneCombo {
+        case .tealOrange:         return (hex(0x05BADD), hex(0xFF9820)) // vibrant teal + vibrant orange
+        case .tealDeepOrange:     return (hex(0x05BADD), hex(0xFB8500)) // vibrant teal + deep orange
+        case .neonBlueOrange:     return (hex(0x2081F9), hex(0xFF9820)) // neon blue + vibrant orange
+        case .deepBlueDeepOrange: return (hex(0x0055DA), hex(0xFB9B1F)) // deep blue + deep orange
+        }
+    }
+
+    private let ropeCount = 14          // segments of the springy band (only used when physicsEnabled)
     private var ropePoints: [NSPoint] = []
     private var ropeVel: [NSPoint] = []
     private var chosenSeconds = 0
@@ -181,7 +205,7 @@ private final class DragView: NSView {
                     return
                 }
             }
-            stepPhysics(tip: easedTip())
+            if Self.physicsEnabled { stepPhysics(tip: easedTip()) }
             needsDisplay = true
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -234,7 +258,7 @@ private final class DragView: NSView {
 
         let raw = confirming ? Double(confirmProgress) : 0.0
         let tip = easedTip()
-        // Rubber band: a soft, scrolling prismatic glow with springy physics; white handle dots.
+        // Rubber band: a soft, scrolling prismatic glow; white handle dots (straight line unless physicsEnabled).
         drawRainbowBand(from: anchor, to: tip, phase: animPhase)
         NSColor.white.withAlphaComponent(0.5).setFill(); dot(at: anchor, radius: 5)
         if !confirming { NSColor.white.setFill(); dot(at: tip, radius: 7) }
@@ -250,18 +274,26 @@ private final class DragView: NSView {
         NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)).fill()
     }
 
-    /// A flowing prismatic band: a few low-alpha wide passes (soft diffuse glow) plus a crisp
-    /// core, each a full-spectrum gradient that scrolls along the line as `phase` advances.
+    /// A flowing prismatic band: many progressively wider, fading passes build a soft fuzzy glow
+    /// that diffuses smoothly off the line (no hard concentric banding), plus a crisp core on top.
+    /// Each pass draws the same scrolling gradient, clipped to a stroked outline.
     private func drawRainbowBand(from a: NSPoint, to b: NSPoint, phase: CGFloat) {
         guard hypot(b.x - a.x, b.y - a.y) > 0.5, let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let core = smoothPath(ropePoints.count == ropeCount + 1 ? ropePoints : [a, b])
-        let gradient = Self.rainbowGradient(phase: phase)
-        let layers: [(width: CGFloat, alpha: CGFloat)] = [(24, 0.10), (16, 0.16), (9, 0.30), (4, 1.0)]
-        for layer in layers {
-            let outline = core.copy(strokingWithWidth: layer.width, lineCap: .round, lineJoin: .round, miterLimit: 1)
+        let core = smoothPath(Self.physicsEnabled && ropePoints.count == ropeCount + 1 ? ropePoints : [a, b])
+        let gradient = Self.bandGradient(phase: phase)
+        // Smooth glow: a soft alpha falloff that fades to ~0 at the rim. The wide, faint outer
+        // passes diffuse the edge; the narrow opaque core (drawn last) is the crisp main line.
+        let passes = 16
+        let coreW: CGFloat = 3.5
+        let rimW: CGFloat = 40
+        for j in stride(from: passes - 1, through: 0, by: -1) {
+            let t = CGFloat(j) / CGFloat(passes - 1)            // 0 = core, 1 = outer rim
+            let width = coreW + (rimW - coreW) * t
+            let alpha: CGFloat = j == 0 ? 1.0 : 0.30 * CGFloat(pow(Double(1 - t), 1.7)) // opaque core; halo tapers to 0
+            let outline = core.copy(strokingWithWidth: width, lineCap: .round, lineJoin: .round, miterLimit: 1)
             ctx.saveGState()
             ctx.addPath(outline); ctx.clip()
-            ctx.setAlpha(layer.alpha)
+            ctx.setAlpha(alpha)
             gradient.draw(from: a, to: b, options: []) // color axis stays anchor→tip
             ctx.restoreGState()
         }
@@ -290,6 +322,46 @@ private final class DragView: NSView {
             return NSColor(hue: hue, saturation: 0.62, brightness: 1.0, alpha: 1.0)
         }
         return NSGradient(colors: colors) ?? NSGradient(starting: .white, ending: .white)!
+    }
+
+    /// Dispatches to the active band palette (see `palette`). Both scroll along the band via `phase`.
+    private static func bandGradient(phase: CGFloat) -> NSGradient {
+        switch palette {
+        case .rainbow: return rainbowGradient(phase: phase)
+        case .duotone: return duotoneGradient(phase: phase)
+        }
+    }
+
+    /// A cinematic cool↔warm duotone (see `duotoneCombo`) that scrolls along the band like the
+    /// rainbow. A raised-cosine blend (cool → warm → cool) keeps the first and last stop equal, so
+    /// the motion loops seamlessly.
+    private static func duotoneGradient(phase: CGFloat) -> NSGradient {
+        let (cool, warm) = duotoneColors()
+        let stops = 12
+        let colors: [NSColor] = (0...stops).map { i in
+            let t = Double(i) / Double(stops)
+            let w = CGFloat(0.5 - 0.5 * cos(2.0 * Double.pi * (t + Double(phase)))) // 0→1→0; scrolls with phase
+            return mix(cool, warm, w)
+        }
+        return NSGradient(colors: colors) ?? NSGradient(starting: cool, ending: warm)!
+    }
+
+    /// NSColor from a `0xRRGGBB` literal.
+    private static func hex(_ rgb: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255.0,
+                green:   CGFloat((rgb >> 8) & 0xFF) / 255.0,
+                blue:    CGFloat(rgb & 0xFF) / 255.0, alpha: 1)
+    }
+
+    /// Linear sRGB blend of two colors (`k` in 0…1).
+    private static func mix(_ c1: NSColor, _ c2: NSColor, _ k: CGFloat) -> NSColor {
+        let a = c1.usingColorSpace(.sRGB) ?? c1
+        let b = c2.usingColorSpace(.sRGB) ?? c2
+        let t = max(0, min(1, k))
+        return NSColor(srgbRed: a.redComponent + (b.redComponent - a.redComponent) * t,
+                       green:   a.greenComponent + (b.greenComponent - a.greenComponent) * t,
+                       blue:    a.blueComponent + (b.blueComponent - a.blueComponent) * t,
+                       alpha: 1)
     }
 
     private static let pillFont = NSFont.systemFont(ofSize: 34, weight: .semibold)
