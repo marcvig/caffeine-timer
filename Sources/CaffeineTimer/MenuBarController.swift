@@ -28,6 +28,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private var tickTimer: Timer?
+    private var guardTimer: Timer?                 // battery-level watchdog while a session is active
+    private var batteryGuardExempt = false         // honor a deliberate start while already below the line
     private lazy var baseGlyph: NSImage? = loadMenuGlyph() // cached; re-tinted per tick when active
 
     // MARK: Menu items
@@ -40,12 +42,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let stopItem = NSMenuItem(title: "Stop", action: nil, keyEquivalent: "")
     private let enableNotifsItem = NSMenuItem(title: "Turn On Notifications…", action: nil, keyEquivalent: "")
     private let customItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
-    private let allowSleepItem = NSMenuItem(title: "Allow display to sleep", action: nil, keyEquivalent: "")
     private var dragOverlay: DurationDragOverlay?
-
-    /// When true, keep only the system awake and let the display sleep normally
-    /// (PreventUserIdleSystemSleep). Default false = keep the screen on too. Persisted.
-    private var allowDisplaySleep = UserDefaults.standard.bool(forKey: "AllowDisplaySleep")
 
     /// (menu label, minutes) for the timed options.
     private let timedOptions: [(label: String, minutes: Int)] = [
@@ -59,6 +56,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     override init() {
         super.init()
+        SettingsWindowController.shared.onDisplaySleepChanged = { [weak self] in self?.reacquireIfActive() }
+        NotificationCenter.default.addObserver(self, selector: #selector(powerStateChanged),
+                                               name: NSNotification.Name.NSProcessInfoPowerStateDidChange, object: nil)
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -70,7 +70,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func shutDown() {
         caffeine.stop()
         stopTicking()
+        stopGuardTimer()
     }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     // MARK: Menu construction
 
@@ -86,6 +89,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                                       action: #selector(checkForUpdates), keyEquivalent: "")
         checkUpdates.target = self
         menu.addItem(checkUpdates)
+
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
 
         menu.addItem(.separator())
 
@@ -115,13 +122,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         customItem.action = #selector(selectCustom)
         customItem.target = self
         menu.addItem(customItem)
-
-        menu.addItem(.separator())
-
-        allowSleepItem.action = #selector(toggleAllowDisplaySleep)
-        allowSleepItem.target = self
-        allowSleepItem.state = allowDisplaySleep ? .on : .off
-        menu.addItem(allowSleepItem)
 
         menu.addItem(.separator())
 
@@ -178,11 +178,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return CGPoint(x: inScreen.midX, y: inScreen.minY)
     }
 
-    @objc private func toggleAllowDisplaySleep() {
-        allowDisplaySleep.toggle()
-        UserDefaults.standard.set(allowDisplaySleep, forKey: "AllowDisplaySleep")
-        allowSleepItem.state = allowDisplaySleep ? .on : .off
-        reacquireIfActive() // swap the live assertion so the change applies immediately
+    @objc private func showSettings() {
+        SettingsWindowController.shared.show()
     }
 
     @objc private func stopTapped() {
@@ -210,12 +207,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func startTimed(seconds: Int) {
         let end = Date().addingTimeInterval(TimeInterval(seconds))
         guard caffeine.start(reason: "CaffeineTimer: awake for \(humanDuration(seconds: seconds))",
-                             keepDisplayAwake: !allowDisplaySleep) else {
+                             keepDisplayAwake: !Settings.allowDisplaySleep) else {
             reportFailure()
             return
         }
         session = .timed(end: end, totalSeconds: seconds)
         startTicking()
+        startGuards()
         updateButton()
         NotificationManager.shared.notify(
             title: "Staying awake for \(humanDuration(seconds: seconds))",
@@ -224,12 +222,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func startIndefinite() {
         guard caffeine.start(reason: "CaffeineTimer: awake indefinitely",
-                             keepDisplayAwake: !allowDisplaySleep) else {
+                             keepDisplayAwake: !Settings.allowDisplaySleep) else {
             reportFailure()
             return
         }
         session = .indefinite
         stopTicking() // nothing to count down
+        startGuards()
         updateButton()
         NotificationManager.shared.notify(
             title: "Staying awake indefinitely",
@@ -245,10 +244,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             break
         case let .timed(_, totalSeconds):
             caffeine.start(reason: "CaffeineTimer: awake for \(humanDuration(seconds: totalSeconds))",
-                           keepDisplayAwake: !allowDisplaySleep)
+                           keepDisplayAwake: !Settings.allowDisplaySleep)
         case .indefinite:
             caffeine.start(reason: "CaffeineTimer: awake indefinitely",
-                           keepDisplayAwake: !allowDisplaySleep)
+                           keepDisplayAwake: !Settings.allowDisplaySleep)
         }
     }
 
@@ -256,6 +255,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func stop(notification: (title: String, body: String)?) {
         caffeine.stop()
         stopTicking()
+        stopGuardTimer()
         session = .idle
         updateButton()
         if let notification {
@@ -295,6 +295,59 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         } else {
             updateButton()      // re-tint icon + countdown to the current green→red ramp color
             updateHeaderTitle() // keep the header live if the menu is held open
+        }
+    }
+
+    // MARK: Power guards (battery level + Low Power Mode)
+
+    /// Start the battery watchdog for the current session. Re-armed each session: the guard only
+    /// fires once charge has been seen *above* the threshold, so manually starting while already
+    /// below it is honored (the "ignored when you start below" semantics).
+    private func startGuards() {
+        stopGuardTimer()
+        // Exempt this session from the battery guard ONLY if it begins on battery already below the
+        // threshold — a deliberate "I know I'm low" start. Beginning on AC and later unplugging while
+        // low is NOT exempt (that case should still be protected).
+        batteryGuardExempt = PowerEnvironment.isOnBattery()
+            && (PowerEnvironment.batteryPercent() ?? 100) < Settings.batteryThreshold
+        // The timer runs for the whole session even when the guard is currently off, so enabling it
+        // mid-session takes effect; checkBatteryGuard() is a cheap no-op (short-circuits) while off.
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in self?.checkBatteryGuard() }
+        RunLoop.current.add(timer, forMode: .common)
+        guardTimer = timer
+        checkBatteryGuard()
+    }
+
+    private func stopGuardTimer() {
+        guardTimer?.invalidate()
+        guardTimer = nil
+    }
+
+    /// Release the keep-awake when, while on battery, charge falls *below* the threshold — unless
+    /// this session deliberately started below it. No-op on AC, on a desktop Mac, or when off.
+    private func checkBatteryGuard() {
+        guard isActive, Settings.batteryGuardEnabled, PowerEnvironment.isOnBattery(),
+              let percent = PowerEnvironment.batteryPercent() else { return }
+        let threshold = Settings.batteryThreshold
+        if percent >= threshold {          // at/above the line: clear any stale exemption and wait
+            batteryGuardExempt = false
+            return
+        }
+        guard !batteryGuardExempt else { return } // started below on battery → honor that choice
+        stop(notification: (title: "Caffeine stopped",
+                            body: "Battery dropped below \(threshold)% — letting your Mac sleep."))
+    }
+
+    /// Low Power Mode guard: release the keep-awake when the user turns Low Power Mode on during a
+    /// session. Event-driven (fires only on change), so deliberately starting while it's already on
+    /// is honored. The notification can arrive off the main thread, so hop back.
+    @objc private func powerStateChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isActive,
+                  Settings.lowPowerModeGuardEnabled,
+                  PowerEnvironment.isLowPowerModeEnabled else { return }
+            self.stop(notification: (title: "Caffeine stopped",
+                                     body: "Low Power Mode turned on — letting your Mac sleep."))
         }
     }
 
